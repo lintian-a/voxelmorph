@@ -134,8 +134,9 @@ class Unet(nn.Module):
             for conv in convs:
                 x = conv(x)
             if not self.half_res or level < (self.nb_levels - 2):
-                x = self.upsampling[level](x)
-                x = torch.cat([x, x_history.pop()], dim=1)
+                x_ = x_history.pop()
+                x = F.interpolate(x, size=x_.shape[2:], mode="nearest")
+                x = torch.cat([x, x_], dim=1)
 
         # remaining convs at full resolution
         for conv in self.remaining:
@@ -282,7 +283,7 @@ class VxmDense(LoadableModel):
 
         # return non-integrated flow field if training
         if not registration:
-            return (y_source, y_target, preint_flow) if self.bidir else (y_source, preint_flow)
+            return (y_source, y_target, preint_flow, pos_flow) if self.bidir else (y_source, preint_flow, pos_flow)
         else:
             return y_source, pos_flow
 
