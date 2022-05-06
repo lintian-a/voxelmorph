@@ -93,7 +93,8 @@ parser.add_argument('--image-loss', default='mse',
                     help='image reconstruction loss - can be mse or ncc (default: mse)')
 parser.add_argument('--lambda', type=float, dest='weight', default=0.01,
                     help='weight of deformation loss (default: 0.01)')
-args = parser.parse_args()
+
+
 
 def prepare(args):
     output_path = args.output_path
@@ -142,124 +143,132 @@ def save_fig(save_path, fname, ite, phase, moving, target, warped, phi):
                             vizImages=None, vizName="", phiWarped=phi,
                             visual_param=visual_param, extraImages=None, extraName="") 
 
+def normalize(phi, shape):
+    for i in range(len(shape)):
+            phi[:, i, ...] = 2 * (phi[:, i, ...] / (shape[i] - 1) - 0.5)
+    return phi
 
-exp_dir = prepare(args)
-model_dir = os.path.join(exp_dir, "checkpoints")
-figure_dir = os.path.join(exp_dir, "records")
+inshape = [175, 175, 175]
 
-training_generator = Data.DataLoader(RegistrationDataset(args.datapath), batch_size=1,
-                                            shuffle=True, num_workers=2)
+if __name__ == "__main__":
+    args = parser.parse_args()
+    exp_dir = prepare(args)
+    model_dir = os.path.join(exp_dir, "checkpoints")
+    figure_dir = os.path.join(exp_dir, "records")
 
-# extract shape from sampled input
-inshape = [175, 175, 175] #next(training_generator)[0][0].shape[1:-1]
+    training_generator = Data.DataLoader(RegistrationDataset(args.datapath), batch_size=1,
+                                                shuffle=True, num_workers=2)
 
-# device handling
-gpus = args.gpu.split(',')
-nb_gpus = len(gpus)
-device = 'cuda'
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-assert np.mod(args.batch_size, nb_gpus) == 0, \
-    'Batch size (%d) should be a multiple of the nr of gpus (%d)' % (args.batch_size, nb_devices)
+    # extract shape from sampled input
+     #next(training_generator)[0][0].shape[1:-1]
 
-# enabling cudnn determinism appears to speed up training by a lot
-torch.backends.cudnn.deterministic = not args.cudnn_nondet
+    # device handling
+    gpus = args.gpu.split(',')
+    nb_gpus = len(gpus)
+    device = 'cuda'
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    assert np.mod(args.batch_size, nb_gpus) == 0, \
+        'Batch size (%d) should be a multiple of the nr of gpus (%d)' % (args.batch_size, nb_devices)
 
-# unet architecture
-enc_nf = args.enc if args.enc else [16, 32, 32, 32]
-dec_nf = args.dec if args.dec else [32, 32, 32, 32, 32, 16, 16]
+    # enabling cudnn determinism appears to speed up training by a lot
+    torch.backends.cudnn.deterministic = not args.cudnn_nondet
 
-if args.load_model:
-    # load initial model (if specified)
-    model = vxm.networks.VxmDense.load(args.load_model, device)
-else:
-    # otherwise configure new model
-    model = vxm.networks.VxmDense(
-        inshape=inshape,
-        nb_unet_features=[enc_nf, dec_nf],
-        bidir=False,
-        int_steps=args.int_steps,
-        int_downsize=args.int_downsize
-    )
+    # unet architecture
+    enc_nf = args.enc if args.enc else [16, 32, 32, 32]
+    dec_nf = args.dec if args.dec else [32, 32, 32, 32, 32, 16, 16]
 
-if nb_gpus > 1:
-    # use multiple GPUs via DataParallel
-    model = torch.nn.DataParallel(model)
-    model.save = model.module.save
+    if args.load_model:
+        # load initial model (if specified)
+        model = vxm.networks.VxmDense.load(args.load_model, device)
+    else:
+        # otherwise configure new model
+        model = vxm.networks.VxmDense(
+            inshape=inshape,
+            nb_unet_features=[enc_nf, dec_nf],
+            bidir=False,
+            int_steps=args.int_steps,
+            int_downsize=args.int_downsize
+        )
 
-# prepare the model for training and send to device
-model.to(device)
-model.train()
+    if nb_gpus > 1:
+        # use multiple GPUs via DataParallel
+        model = torch.nn.DataParallel(model)
+        model.save = model.module.save
 
-# set optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # prepare the model for training and send to device
+    model.to(device)
+    model.train()
 
-# prepare image loss
-if args.image_loss == 'ncc':
-    image_loss_func = vxm.losses.NCC().loss
-elif args.image_loss == 'mse':
-    image_loss_func = vxm.losses.MSE().loss
-else:
-    raise ValueError('Image loss should be "mse" or "ncc", but found "%s"' % args.image_loss)
+    # set optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-losses = [image_loss_func]
-weights = [1]
+    # prepare image loss
+    if args.image_loss == 'ncc':
+        image_loss_func = vxm.losses.NCC().loss
+    elif args.image_loss == 'mse':
+        image_loss_func = vxm.losses.MSE().loss
+    else:
+        raise ValueError('Image loss should be "mse" or "ncc", but found "%s"' % args.image_loss)
 
-# prepare deformation loss
-losses += [vxm.losses.Grad('l2', loss_mult=args.int_downsize).loss]
-weights += [args.weight]
+    losses = [image_loss_func]
+    weights = [1]
 
-# training loops
-for epoch in range(args.initial_epoch, args.epochs):
+    # prepare deformation loss
+    losses += [vxm.losses.Grad('l2', loss_mult=args.int_downsize).loss]
+    weights += [args.weight]
 
-    # save model checkpoint
-    if epoch % 20 == 0:
-        model.save(os.path.join(model_dir, '%04d.pt' % epoch))
+    # training loops
+    for epoch in range(args.initial_epoch, args.epochs):
 
-    epoch_loss = []
-    epoch_total_loss = []
-    epoch_step_time = []
+        # save model checkpoint
+        if epoch % 20 == 0:
+            model.save(os.path.join(model_dir, '%04d.pt' % epoch))
 
-    for X, Y, fname in training_generator:
-        step_start_time = time.time()
+        epoch_loss = []
+        epoch_total_loss = []
+        epoch_step_time = []
 
-        # generate inputs (and true outputs) and convert them to tensors
-        X = X.to(device).float()
-        Y = Y.to(device).float()
-        inputs = [X, Y]
-        y_true = [Y, Y]
+        for X, Y, fname in training_generator:
+            step_start_time = time.time()
 
-        # run inputs through the model to produce a warped image and flow field
-        y_pred = model(*inputs)
+            # generate inputs (and true outputs) and convert them to tensors
+            X = X.to(device).float()
+            Y = Y.to(device).float()
+            inputs = [X, Y]
+            y_true = [Y, Y]
 
-        # calculate total loss
-        loss = 0
-        loss_list = []
-        for n, loss_function in enumerate(losses):
-            curr_loss = loss_function(y_true[n], y_pred[n]) * weights[n]
-            loss_list.append(curr_loss.item())
-            loss += curr_loss
+            # run inputs through the model to produce a warped image and flow field
+            y_pred = model(*inputs)
 
-        epoch_loss.append(loss_list)
-        epoch_total_loss.append(loss.item())
+            # calculate total loss
+            loss = 0
+            loss_list = []
+            for n, loss_function in enumerate(losses):
+                curr_loss = loss_function(y_true[n], y_pred[n]) * weights[n]
+                loss_list.append(curr_loss.item())
+                loss += curr_loss
 
-        # backpropagate and optimize
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            epoch_loss.append(loss_list)
+            epoch_total_loss.append(loss.item())
 
-        # get compute time
-        epoch_step_time.append(time.time() - step_start_time)
+            # backpropagate and optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-    #plot figure
-    if epoch % 2 == 0:
-        save_fig(figure_dir, fname, epoch, "train", X.cpu(), Y.detach().cpu(), y_pred[0].detach().cpu(), y_pred[-1].detach().cpu())
+            # get compute time
+            epoch_step_time.append(time.time() - step_start_time)
 
-    # print epoch info
-    epoch_info = 'Epoch %d/%d' % (epoch + 1, args.epochs)
-    time_info = '%.4f sec/step' % np.mean(epoch_step_time)
-    losses_info = ', '.join(['%.4e' % f for f in np.mean(epoch_loss, axis=0)])
-    loss_info = 'loss: %.4e  (%s)' % (np.mean(epoch_total_loss), losses_info)
-    print(' - '.join((epoch_info, time_info, loss_info)), flush=True)
+        #plot figure
+        if epoch % 2 == 0:
+            save_fig(figure_dir, fname, epoch, "train", X.cpu(), Y.detach().cpu(), y_pred[0].detach().cpu(), normalize(y_pred[-1].detach()+model.transformer.grid, [175, 175, 175]).cpu())
 
-# final model save
-model.save(os.path.join(model_dir, '%04d.pt' % args.epochs))
+        # print epoch info
+        epoch_info = 'Epoch %d/%d' % (epoch + 1, args.epochs)
+        time_info = '%.4f sec/step' % np.mean(epoch_step_time)
+        losses_info = ', '.join(['%.4e' % f for f in np.mean(epoch_loss, axis=0)])
+        loss_info = 'loss: %.4e  (%s)' % (np.mean(epoch_total_loss), losses_info)
+        print(' - '.join((epoch_info, time_info, loss_info)), flush=True)
+
+    # final model save
+    model.save(os.path.join(model_dir, '%04d.pt' % args.epochs))
